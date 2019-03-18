@@ -1,0 +1,203 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: amq-replicated
+parameters:
+- name: APP_NAME
+  value: amq-repl-01
+- name: PROMETHEUS_JMX_REPO_URL
+  description: default is http://central.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/${PROMETHEUS_JMX_AGENT_VERSION}
+  value: "http://www.demo.rht.ru/repos/maven/repository/io/prometheus/jmx/jmx_prometheus_javaagent"
+- name: PROMETHEUS_JMX_AGENT_VERSION
+  value: "0.3.1"
+- name: REDHAT_COMPONENT_NAME
+  value: amq-broker-7.2.0-bin.zip
+- name: REDHAT_REPO_URL
+  description: An URL where ${REDHAT_COMPONENT_NAME} is
+  required: true
+  value: "http://www.demo.rht.ru/repos"
+- name: ADMIN_USER
+  generate: expression
+  from: "[a-zA-Z0-9]{12}"
+- name: ADMIN_PASSWORD
+  generate: expression
+  from: "[a-zA-Z0-9]{12}"
+- name: LOGGING_LEVEL
+  value: INFO
+objects:
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    labels:
+      app: ${APP_NAME}
+    name: ${APP_NAME}
+  spec:
+    lookupPolicy:
+      local: true
+    tags:
+    - name: latest
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    labels:
+      app: ${APP_NAME}
+    name: ${APP_NAME}
+  spec:
+    output:
+      to:
+        kind: ImageStreamTag
+        name: ${APP_NAME}:latest
+    source:
+      contextDir: amq
+      git:
+        uri: http://gogs.dmz-apps.demo.rht.ru/dsevosty/openshift-xpaas-tp
+      type: Git
+    strategy:
+      dockerStrategy:
+        env:
+        - name: PROMETHEUS_JMX_AGENT_VERSION
+          value: ${PROMETHEUS_JMX_AGENT_VERSION}
+        - name: PROMETHEUS_JMX_REPO_URL
+          value: ${PROMETHEUS_JMX_REPO_URL}
+        - name: REDHAT_COMPONENT_NAME
+          value: ${REDHAT_COMPONENT_NAME}
+        - name: REDHAT_REPO_URL
+          value: ${REDHAT_REPO_URL}
+        from:
+          kind: ImageStreamTag
+          name: redhat-openjdk18-openshift:1.4
+          namespace: openshift
+      type: Docker
+    triggers:
+    - type: ConfigChange
+    - imageChange: {}
+      type: ImageChange
+- apiVersion: apps/v1beta1
+  kind: StatefulSet
+  metadata:
+    labels:
+      app: ${APP_NAME}
+    name: ${APP_NAME}
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: "${APP_NAME}"
+    serviceName: "${APP_NAME}"
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          app: ${APP_NAME}
+          template: amq-replicated
+      spec:
+        containers:
+        - env:
+          - name: ADMIN_PASSWORD
+            value: ${ADMIN_PASSWORD}
+          - name: ADMIN_USER
+            value: ${ADMIN_USER}
+          - name: LOGGING_LEVEL
+            value: ${LOGGING_LEVEL}
+          - name: AMQ_CLUSTERED
+            value: "yes"
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: status.podIP
+          - name: HEADLESS_SERVICE_NAME
+            value: "${APP_NAME}"
+          image: "${APP_NAME}:latest"
+          imagePullPolicy: Always
+          name: ${APP_NAME}
+          ports:
+          - containerPort: 1883
+            protocol: TCP
+          - containerPort: 5445
+            protocol: TCP
+          - containerPort: 5672
+            protocol: TCP
+          - containerPort: 61613
+            protocol: TCP
+          - containerPort: 61616
+            protocol: TCP
+          - containerPort: 8161
+            protocol: TCP
+          - containerPort: 9779
+            name: prometheus
+            protocol: TCP
+          volumeMounts:
+          - name: amq-data
+            mountPath: /amq-broker-data
+    volumeClaimTemplates:
+    - metadata:
+        name: amq-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 1Gi
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: ${APP_NAME}
+    name: ${APP_NAME}
+  spec:
+    clusterIP: None
+    publishNotReadyAddresses: true
+    ports:
+    - name: mqtt-1883-tcp
+      port: 1883
+    - name: hornetq-stomp-5445-tcp
+      port: 5445
+    - name: amqp-5672-tcp
+      port: 5672
+    - name: stomp-61613-tcp
+      port: 61613
+    - name: core-61616-tcp
+      port: 61616
+    selector:
+      app: ${APP_NAME}
+    type: ClusterIP
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: ${APP_NAME}
+    name: ${APP_NAME}-broker-amq-tcp
+  spec:
+    ports:
+    - port: 9779
+      name: prometheus-jmx
+    selector:
+      app: ${APP_NAME}
+    type: ClusterIP
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: ${APP_NAME}
+    name: ${APP_NAME}-console
+  spec:
+    ports:
+    - port: 8161
+      name: artemis-web
+    selector:
+      app: ${APP_NAME}
+    type: ClusterIP
+- apiVersion: v1
+  kind: Route
+  metadata:
+    labels:
+      app: ${APP_NAME}
+    name: ${APP_NAME}-console
+  spec:
+    port:
+      targetPort: 8161
+    to:
+      kind: Service
+      name: ${APP_NAME}-console
+
